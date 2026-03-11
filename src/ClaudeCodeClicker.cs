@@ -4,6 +4,7 @@
 
 using System;
 using System.Drawing;
+using System.Runtime.InteropServices;
 using System.Windows.Automation;
 using System.Windows.Forms;
 
@@ -151,11 +152,19 @@ class ButtonWatcher
     private const string TitlePattern = "Claude";
     private const string ClassNameFilter = "Chrome_WidgetWin_1";
     private const string ButtonPattern = "Ctrl Enter";
+    private const int GC_INTERVAL = 10; // Force GC every N polls
+
+    // Cached conditions (COM objects — create once, reuse forever)
+    private static readonly PropertyCondition WindowTypeCondition =
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Window);
+    private static readonly PropertyCondition ButtonTypeCondition =
+        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button);
 
     private AutomationElement cachedWindow;
     private string lastStatus;
     private string lastClickInfo;
     private int totalClicks;
+    private int pollCount;
 
     public string LastStatus { get { return lastStatus; } }
     public string LastClickInfo { get { return lastClickInfo; } }
@@ -166,10 +175,13 @@ class ButtonWatcher
         lastStatus = "Starting...";
         lastClickInfo = null;
         totalClicks = 0;
+        pollCount = 0;
     }
 
     public void Poll()
     {
+        pollCount++;
+
         try
         {
             // Ensure we have a valid window
@@ -193,14 +205,23 @@ class ButtonWatcher
             }
 
             // Scan for buttons and click
-            lastStatus = "Watching: Claude (clicks: " + totalClicks + ")";
+            long memMB = GC.GetTotalMemory(false) / (1024 * 1024);
+            lastStatus = "Watching: Claude (clicks: " + totalClicks + ", mem: " + memMB + "MB)";
             FindAndClickButton();
         }
         catch (Exception)
         {
-            // Any error: reset window and retry next tick
             cachedWindow = null;
             lastStatus = "Error, re-searching...";
+        }
+        finally
+        {
+            // Periodic GC to release COM RCWs that hold native memory
+            if (pollCount % GC_INTERVAL == 0)
+            {
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized);
+                GC.WaitForPendingFinalizers();
+            }
         }
     }
 
@@ -210,10 +231,7 @@ class ButtonWatcher
         {
             AutomationElement root = AutomationElement.RootElement;
             AutomationElementCollection children = root.FindAll(
-                TreeScope.Children,
-                new PropertyCondition(
-                    AutomationElement.ControlTypeProperty,
-                    ControlType.Window));
+                TreeScope.Children, WindowTypeCondition);
 
             foreach (AutomationElement child in children)
             {
@@ -232,14 +250,12 @@ class ButtonWatcher
                 }
                 catch (Exception)
                 {
-                    // Skip inaccessible elements
                     continue;
                 }
             }
         }
         catch (Exception)
         {
-            // Root element access failed
         }
 
         return null;
@@ -249,13 +265,12 @@ class ButtonWatcher
     {
         try
         {
-            AutomationElementCollection buttons = cachedWindow.FindAll(
-                TreeScope.Descendants,
-                new PropertyCondition(
-                    AutomationElement.ControlTypeProperty,
-                    ControlType.Button));
+            // Use TreeWalker to avoid building full collection in memory.
+            // Walk descendants one-by-one, stop as soon as target is found.
+            TreeWalker walker = new TreeWalker(ButtonTypeCondition);
+            AutomationElement btn = walker.GetFirstChild(cachedWindow);
 
-            foreach (AutomationElement btn in buttons)
+            while (btn != null)
             {
                 try
                 {
@@ -263,7 +278,6 @@ class ButtonWatcher
                     if (name != null
                         && name.IndexOf(ButtonPattern, StringComparison.OrdinalIgnoreCase) >= 0)
                     {
-                        // Found target button - invoke it
                         if (TryInvoke(btn))
                         {
                             totalClicks++;
@@ -271,7 +285,39 @@ class ButtonWatcher
                                 + " - \"" + name + "\"";
                             lastStatus = "Clicked: \"" + name + "\" (total: " + totalClicks + ")";
                         }
-                        return; // Only click the first match
+                        return;
+                    }
+                }
+                catch (Exception)
+                {
+                    // Skip this element
+                }
+
+                btn = walker.GetNextSibling(btn);
+            }
+
+            // TreeWalker only walks direct children with the condition.
+            // Buttons in Electron are deeply nested — fall back to FindAll
+            // but only if TreeWalker found nothing.
+            AutomationElementCollection buttons = cachedWindow.FindAll(
+                TreeScope.Descendants, ButtonTypeCondition);
+
+            foreach (AutomationElement deepBtn in buttons)
+            {
+                try
+                {
+                    string name = deepBtn.Current.Name;
+                    if (name != null
+                        && name.IndexOf(ButtonPattern, StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        if (TryInvoke(deepBtn))
+                        {
+                            totalClicks++;
+                            lastClickInfo = DateTime.Now.ToString("HH:mm:ss")
+                                + " - \"" + name + "\"";
+                            lastStatus = "Clicked: \"" + name + "\" (total: " + totalClicks + ")";
+                        }
+                        return;
                     }
                 }
                 catch (Exception)
@@ -282,7 +328,6 @@ class ButtonWatcher
         }
         catch (Exception)
         {
-            // Window may have become invalid
             cachedWindow = null;
         }
     }
@@ -300,7 +345,6 @@ class ButtonWatcher
         }
         catch (Exception)
         {
-            // Invoke failed
         }
         return false;
     }
@@ -309,7 +353,6 @@ class ButtonWatcher
     {
         try
         {
-            // Accessing a property on a dead element throws
             string name = window.Current.Name;
             return name != null;
         }
