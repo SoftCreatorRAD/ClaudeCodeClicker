@@ -4,12 +4,11 @@
 
 using System;
 using System.Drawing;
-using System.Runtime.InteropServices;
 using System.Windows.Automation;
 using System.Windows.Forms;
 
 // =========================================================================
-// Program Entry Point
+// Program
 // =========================================================================
 
 static class Program
@@ -24,7 +23,7 @@ static class Program
 }
 
 // =========================================================================
-// TrayApp - System Tray Application
+// TrayApp
 // =========================================================================
 
 class TrayApp : ApplicationContext
@@ -41,24 +40,21 @@ class TrayApp : ApplicationContext
         watcher = new ButtonWatcher();
         isPaused = false;
 
-        // Context menu
         menu = new ContextMenuStrip();
         pauseItem = new ToolStripMenuItem("Pause", null, OnPauseClick);
         menu.Items.Add(pauseItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, OnExitClick);
 
-        // Tray icon
         trayIcon = new NotifyIcon();
         trayIcon.Icon = SystemIcons.Shield;
-        trayIcon.Text = "ClaudeCodeClicker - Starting...";
+        trayIcon.Text = "ClaudeCodeClicker";
         trayIcon.ContextMenuStrip = menu;
         trayIcon.DoubleClick += OnTrayDoubleClick;
         trayIcon.Visible = true;
 
-        // Poll timer (1 second)
         pollTimer = new Timer();
-        pollTimer.Interval = 1000;
+        pollTimer.Interval = 2000;
         pollTimer.Tick += OnPollTick;
         pollTimer.Start();
     }
@@ -66,30 +62,16 @@ class TrayApp : ApplicationContext
     private void OnPollTick(object sender, EventArgs e)
     {
         watcher.Poll();
-        UpdateTooltip();
-    }
 
-    private void UpdateTooltip()
-    {
-        string status = watcher.LastStatus;
-        if (isPaused)
-        {
-            status = "Paused";
-        }
-
-        // NotifyIcon.Text has 63 char limit
+        string status = isPaused ? "Paused" : watcher.LastStatus;
         if (status != null && status.Length > 63)
-        {
             status = status.Substring(0, 60) + "...";
-        }
-
         trayIcon.Text = status ?? "ClaudeCodeClicker";
     }
 
     private void OnPauseClick(object sender, EventArgs e)
     {
         isPaused = !isPaused;
-
         if (isPaused)
         {
             pollTimer.Stop();
@@ -102,22 +84,15 @@ class TrayApp : ApplicationContext
             pauseItem.Text = "Pause";
             trayIcon.Icon = SystemIcons.Shield;
         }
-
-        UpdateTooltip();
     }
 
     private void OnTrayDoubleClick(object sender, EventArgs e)
     {
         string msg = watcher.LastStatus ?? "No status";
-        string clicked = watcher.LastClickInfo;
-        if (clicked != null)
-        {
-            msg += "\n\nLast click: " + clicked;
-        }
-
+        if (watcher.LastClickInfo != null)
+            msg += "\nLast: " + watcher.LastClickInfo;
         trayIcon.BalloonTipTitle = "ClaudeCodeClicker";
         trayIcon.BalloonTipText = msg;
-        trayIcon.BalloonTipIcon = ToolTipIcon.Info;
         trayIcon.ShowBalloonTip(3000);
     }
 
@@ -144,7 +119,7 @@ class TrayApp : ApplicationContext
 }
 
 // =========================================================================
-// ButtonWatcher - UI Automation Monitor & Auto-Clicker
+// ButtonWatcher
 // =========================================================================
 
 class ButtonWatcher
@@ -152,125 +127,53 @@ class ButtonWatcher
     private const string TitlePattern = "Claude";
     private const string ClassNameFilter = "Chrome_WidgetWin_1";
     private const string ButtonPattern = "Ctrl Enter";
-    private const int GC_INTERVAL = 10; // Force GC every N polls
 
-    // Cached conditions (COM objects — create once, reuse forever)
-    private static readonly PropertyCondition WindowTypeCondition =
-        new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Window);
-    private static readonly PropertyCondition ButtonTypeCondition =
+    private static readonly Condition ButtonCondition =
         new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button);
 
     private AutomationElement cachedWindow;
+    private int totalClicks;
     private string lastStatus;
     private string lastClickInfo;
-    private int totalClicks;
-    private int pollCount;
 
     public string LastStatus { get { return lastStatus; } }
     public string LastClickInfo { get { return lastClickInfo; } }
 
-    public ButtonWatcher()
-    {
-        cachedWindow = null;
-        lastStatus = "Starting...";
-        lastClickInfo = null;
-        totalClicks = 0;
-        pollCount = 0;
-    }
-
     public void Poll()
     {
-        pollCount++;
-
         try
         {
-            // Ensure we have a valid window
-            if (cachedWindow == null)
+            if (cachedWindow == null || !IsAlive(cachedWindow))
             {
                 cachedWindow = FindWindow();
+                if (cachedWindow == null)
+                {
+                    lastStatus = "Searching for Claude...";
+                    return;
+                }
             }
 
-            if (cachedWindow == null)
-            {
-                lastStatus = "Searching for Claude window...";
-                return;
-            }
-
-            // Verify window is still alive
-            if (!IsWindowAlive(cachedWindow))
-            {
-                cachedWindow = null;
-                lastStatus = "Window lost, re-searching...";
-                return;
-            }
-
-            // Scan for buttons and click
-            long memMB = GC.GetTotalMemory(false) / (1024 * 1024);
-            lastStatus = "Watching: Claude (clicks: " + totalClicks + ", mem: " + memMB + "MB)";
-            FindAndClickButton();
+            lastStatus = "Watching Claude (clicks: " + totalClicks + ")";
+            ScanAndClick();
         }
-        catch (Exception)
+        catch
         {
             cachedWindow = null;
-            lastStatus = "Error, re-searching...";
-        }
-        finally
-        {
-            // Periodic GC to release COM RCWs that hold native memory
-            if (pollCount % GC_INTERVAL == 0)
-            {
-                GC.Collect(GC.MaxGeneration, GCCollectionMode.Optimized);
-                GC.WaitForPendingFinalizers();
-            }
+            lastStatus = "Error, retrying...";
         }
     }
 
-    private AutomationElement FindWindow()
+    private void ScanAndClick()
     {
+        // Tell GC about the ~1MB of native COM memory FindAll will allocate.
+        // This makes GC collect COM wrappers proactively instead of letting them pile up.
+        GC.AddMemoryPressure(1024 * 1024);
         try
         {
-            AutomationElement root = AutomationElement.RootElement;
-            AutomationElementCollection children = root.FindAll(
-                TreeScope.Children, WindowTypeCondition);
+            AutomationElementCollection buttons = cachedWindow.FindAll(
+                TreeScope.Descendants, ButtonCondition);
 
-            foreach (AutomationElement child in children)
-            {
-                try
-                {
-                    string name = child.Current.Name;
-                    string className = child.Current.ClassName;
-
-                    if (name != null
-                        && className != null
-                        && name.IndexOf(TitlePattern, StringComparison.OrdinalIgnoreCase) >= 0
-                        && className.Equals(ClassNameFilter, StringComparison.OrdinalIgnoreCase))
-                    {
-                        return child;
-                    }
-                }
-                catch (Exception)
-                {
-                    continue;
-                }
-            }
-        }
-        catch (Exception)
-        {
-        }
-
-        return null;
-    }
-
-    private void FindAndClickButton()
-    {
-        try
-        {
-            // Use TreeWalker to avoid building full collection in memory.
-            // Walk descendants one-by-one, stop as soon as target is found.
-            TreeWalker walker = new TreeWalker(ButtonTypeCondition);
-            AutomationElement btn = walker.GetFirstChild(cachedWindow);
-
-            while (btn != null)
+            foreach (AutomationElement btn in buttons)
             {
                 try
                 {
@@ -278,87 +181,59 @@ class ButtonWatcher
                     if (name != null
                         && name.IndexOf(ButtonPattern, StringComparison.OrdinalIgnoreCase) >= 0)
                     {
-                        if (TryInvoke(btn))
+                        object pat;
+                        if (btn.TryGetCurrentPattern(InvokePattern.Pattern, out pat))
                         {
+                            ((InvokePattern)pat).Invoke();
                             totalClicks++;
-                            lastClickInfo = DateTime.Now.ToString("HH:mm:ss")
-                                + " - \"" + name + "\"";
-                            lastStatus = "Clicked: \"" + name + "\" (total: " + totalClicks + ")";
+                            lastClickInfo = DateTime.Now.ToString("HH:mm:ss") + " \"" + name + "\"";
+                            lastStatus = "Clicked! (total: " + totalClicks + ")";
                         }
                         return;
                     }
                 }
-                catch (Exception)
-                {
-                    // Skip this element
-                }
-
-                btn = walker.GetNextSibling(btn);
+                catch { }
             }
+        }
+        finally
+        {
+            GC.RemoveMemoryPressure(1024 * 1024);
+        }
+    }
 
-            // TreeWalker only walks direct children with the condition.
-            // Buttons in Electron are deeply nested — fall back to FindAll
-            // but only if TreeWalker found nothing.
-            AutomationElementCollection buttons = cachedWindow.FindAll(
-                TreeScope.Descendants, ButtonTypeCondition);
+    private static AutomationElement FindWindow()
+    {
+        try
+        {
+            AutomationElement root = AutomationElement.RootElement;
+            // Walk direct children only — cheap operation
+            TreeWalker walker = TreeWalker.ControlViewWalker;
+            AutomationElement child = walker.GetFirstChild(root);
 
-            foreach (AutomationElement deepBtn in buttons)
+            while (child != null)
             {
                 try
                 {
-                    string name = deepBtn.Current.Name;
-                    if (name != null
-                        && name.IndexOf(ButtonPattern, StringComparison.OrdinalIgnoreCase) >= 0)
+                    string name = child.Current.Name;
+                    string cls = child.Current.ClassName;
+                    if (name != null && cls != null
+                        && name.IndexOf(TitlePattern, StringComparison.OrdinalIgnoreCase) >= 0
+                        && cls.Equals(ClassNameFilter, StringComparison.OrdinalIgnoreCase))
                     {
-                        if (TryInvoke(deepBtn))
-                        {
-                            totalClicks++;
-                            lastClickInfo = DateTime.Now.ToString("HH:mm:ss")
-                                + " - \"" + name + "\"";
-                            lastStatus = "Clicked: \"" + name + "\" (total: " + totalClicks + ")";
-                        }
-                        return;
+                        return child;
                     }
                 }
-                catch (Exception)
-                {
-                    continue;
-                }
+                catch { }
+                child = walker.GetNextSibling(child);
             }
         }
-        catch (Exception)
-        {
-            cachedWindow = null;
-        }
+        catch { }
+        return null;
     }
 
-    private static bool TryInvoke(AutomationElement element)
+    private static bool IsAlive(AutomationElement el)
     {
-        try
-        {
-            object pattern;
-            if (element.TryGetCurrentPattern(InvokePattern.Pattern, out pattern))
-            {
-                ((InvokePattern)pattern).Invoke();
-                return true;
-            }
-        }
-        catch (Exception)
-        {
-        }
-        return false;
-    }
-
-    private static bool IsWindowAlive(AutomationElement window)
-    {
-        try
-        {
-            string name = window.Current.Name;
-            return name != null;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
+        try { return el.Current.Name != null; }
+        catch { return false; }
     }
 }
