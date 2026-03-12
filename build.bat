@@ -7,7 +7,6 @@ REM ============================================
 setlocal
 
 set CSC=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe
-set WPF=C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF
 set SRC=%~dp0src\ClaudeCodeClicker.cs
 set OUT_DIR=%~dp0bin
 set OUT=%OUT_DIR%\ClaudeCodeClicker.exe
@@ -30,7 +29,7 @@ echo   Source: %SRC%
 echo   Output: %OUT%
 echo.
 
-"%CSC%" /target:winexe /out:"%OUT%" /reference:"%WPF%\UIAutomationClient.dll" /reference:"%WPF%\UIAutomationTypes.dll" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll "%SRC%"
+"%CSC%" /target:winexe /out:"%OUT%" /reference:System.Windows.Forms.dll /reference:System.Drawing.dll "%SRC%"
 
 if errorlevel 1 (
     echo.
